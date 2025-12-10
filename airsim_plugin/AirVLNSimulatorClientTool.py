@@ -201,7 +201,16 @@ class AirVLNSimulatorClientTool:
             ports = result[1][1]
             self.airsim_ip = ip
             self.airsim_ports = ports
-            assert str(ip) == str(socket_client.address._host), '打开场景失败'
+
+            # 之前这里有 assert str(ip) == str(socket_client.address._host) 或你自己加的端口检查
+            # 为了兼容本机单节点，我们只要连接成功就认为场景打开成功，不再做额外的 host/port 断言。
+            try:
+            # 轻量读一下，确保连接是通的（可选）
+                _ = socket_client.call('ping')
+            except Exception as e:
+                logger.error(f"连接 AirSim 失败: {e}")
+                raise Exception('打开场景失败')
+            
             assert len(ports) == len(self.machines_info[index]['open_scenes']), '打开场景失败'
             for i, port in enumerate(ports):
                 if self.machines_info[index]['open_scenes'][i] is None:
