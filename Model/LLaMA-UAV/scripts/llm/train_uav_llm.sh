@@ -4,7 +4,7 @@
 root_dir=/home/airport/airdrone/TravelUAV/TravelUAV # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
 deepspeed \
-    --include localhost:0 \
+    --include localhost:0,1,2,3,4,5,6,7 \
     --master_port 29101 \
     $model_dir/llamavid/train/train_uav/train_uav_notice.py \
     --data_path $root_dir/data/uav_dataset/trainset.json \
@@ -29,7 +29,7 @@ deepspeed \
     --compress_type "mean" \
     --bf16 True \
     --num_train_epochs 2 \
-    --per_device_train_batch_size 4 \
+    --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
