@@ -302,6 +302,10 @@ env_exec_path_dict = {
 }
 def create_drones(drone_num_per_env=1, show_scene=False, uav_mode=True) -> dict:
     airsim_settings = copy.deepcopy(AIRSIM_SETTINGS_TEMPLATE)
+    # AirSim's "ViewMode": "NoDisplay" disables the UE viewport window.
+    # When show_scene is requested, switch to a visible view mode.
+    if show_scene:
+        airsim_settings["ViewMode"] = "FlyWithMe"
     return airsim_settings
 
 
@@ -512,7 +516,7 @@ class EventHandler(object):
         p_s = []
         for index, (scen_id, gpu_id) in enumerate(scen_id_gpu_list):
             # airsim settings 4
-            airsim_settings = create_drones()
+            airsim_settings = create_drones(show_scene=args.show_scene)
             airsim_settings['ApiServerPort'] = int(ports[index])
             self.port_to_scene[ports[index]] = (scen_id, gpu_id)
             airsim_settings_write_content = json.dumps(airsim_settings)
@@ -526,8 +530,12 @@ class EventHandler(object):
                 p_s.append(None)
                 continue
             else:
-                subprocess_execute = "bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
+                render_flags = ""
+                if not args.show_scene:
+                    render_flags = "-RenderOffscreen "
+                subprocess_execute = "bash {} {}-NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
                     choose_env_exe_paths[index],
+                    render_flags,
                     gpu_id,
                     str(CWD_DIR / 'settings' / str(ports[index]) / 'settings.json'),
                 )
@@ -565,11 +573,15 @@ class EventHandler(object):
         scene_id, gpu_id = self.port_to_scene[port]
         env_info = env_exec_path_dict.get(scene_id)
         env_path = os.path.join(args.root_path, env_info['exec_path'], env_info['bash_name'] + '.sh')
-        subprocess_execute = "bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
-                    env_path,
-                    gpu_id,
-                    str(CWD_DIR / 'settings' / str(port) / 'settings.json'),
-                )
+        render_flags = ""
+        if not args.show_scene:
+            render_flags = "-RenderOffscreen "
+        subprocess_execute = "bash {} {}-NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
+            env_path,
+            render_flags,
+            gpu_id,
+            str(CWD_DIR / 'settings' / str(port) / 'settings.json'),
+        )
         time.sleep(1)
         print(subprocess_execute)
         
@@ -683,6 +695,11 @@ if __name__ == '__main__':
         default="/nfs/airport/airdrone/",
         help='root dir for env path'
     ) 
+    parser.add_argument(
+        "--show_scene",
+        action="store_true",
+        help="Launch UE/AirSim with a visible viewport window (disables NoDisplay and -RenderOffscreen).",
+    )
     args = parser.parse_args()
 
 

@@ -255,6 +255,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def raw_encode_images(self, images):
+        raw_image_features = self.get_model().get_vision_tower()(images)
+        return raw_image_features
+
     def encode_images(self, images, prompts=None, image_counts=None, long_video=False):        
         if long_video:
             # use pre-computed features
@@ -485,7 +489,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            return input_ids, attention_mask, past_key_values, None, labels
+            return input_ids, attention_mask, past_key_values, None, labels, None
         
         
         # pre-process images for long video
@@ -503,8 +507,17 @@ class LLaMAVIDMetaForCausalLM(ABC):
             concat_images = torch.cat(images, dim=0)
             # 160, 3, 224, 224
             image_features = self.encode_images(concat_images, prompts, image_counts, long_video=long_video)
+            if long_video:
+                # inputs are already precomputed vision features
+                raw_image_features = concat_images
+            else:
+                raw_image_features = self.raw_encode_images(concat_images)
         else:
             image_features = self.encode_images(images, prompts, long_video=long_video)
+            if long_video:
+                raw_image_features = images
+            else:
+                raw_image_features = self.raw_encode_images(images)
         # concat img_feature
         v2 = False
         v3 = True
@@ -752,7 +765,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, raw_image_features
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:

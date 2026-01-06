@@ -141,9 +141,14 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
             info = history.view(-1, 3)
             history_embed = self.history_preprocessor(info)
             history_embeds.append(history_embed)
-            
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
+        
+        # input_ids = None, inputs_embeds = 融合了image和text的embedding
+        input_ids, attention_mask, past_key_values, inputs_embeds, labels, raw_image_features = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
+
+        #  获取 M_work
+
+
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(
