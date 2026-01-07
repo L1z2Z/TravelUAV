@@ -26,6 +26,8 @@ from llamavid.model.language_model.llama_uav import LlamaUAVModel, LlamaUAVForCa
 
 from llamavid.constants import WAYPOINT_LABEL_TOKEN
 
+from llamavid.model.LTM.memory_manager import MemoryManager
+
 class LlavaConfig(LlamaConfig):
     model_type = "llava"
 
@@ -75,6 +77,7 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         self.waypoint_loss_scale = 1.0
         self.special_token_dict = None
 
+        self.memory_manager = MemoryManager()
         # Initialize weights and apply final processing
         self.post_init()
     
@@ -146,9 +149,6 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         input_ids, attention_mask, past_key_values, inputs_embeds, labels, raw_image_features = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
 
-        #  获取 M_work
-
-
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(
@@ -162,6 +162,31 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
             return_dict=return_dict
         )
         hidden_states = outputs[0]
+
+        # Update working memory with semantic tokens pooled from prefix (pre-waypoint) hidden states.
+        # This is single-forward and reduces wp/action leakage due to the causal mask.
+        
+        if raw_image_features is not None:
+            with torch.no_grad():
+                B, S = labels.shape
+                wp_mask = labels == WAYPOINT_LABEL_TOKEN  # [B,S]
+                has_wp = wp_mask.any(dim=1) # [B] 每个batch有wp则为True
+                first_wp = torch.where(
+                    has_wp,
+                    wp_mask.float().argmax(dim=1),
+                    torch.full((B,), S, device=labels.device, dtype=torch.long),
+                ) # [B] 表示每个batch中第一个waypoint的位置
+                pos = torch.arange(S, device=labels.device).unsqueeze(0).expand(B, S)
+                prefix_valid = attention_mask.to(dtype=torch.bool) & (pos < first_wp.unsqueeze(1)) & (~wp_mask)
+                semantic_key_padding_mask = ~prefix_valid  # True means "ignore" in MultiheadAttention
+
+            self.memory_manager.update_working_memory(
+                raw_image_features=raw_image_features,
+                semantic_memory=hidden_states,
+                d_llm=self.config.hidden_size,
+                semantic_key_padding_mask=semantic_key_padding_mask,
+            )
+
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         predicted_waypoints = self.forward_waypoint(waypoints_feat)
         
