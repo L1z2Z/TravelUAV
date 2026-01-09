@@ -106,12 +106,18 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
         prompts: Optional[List[str]] = None,
+        instruction_input_ids: Optional[torch.LongTensor] = None,
+        instruction_attention_mask: Optional[torch.Tensor] = None,
         waypoints: Optional[torch.FloatTensor] = None,
         orientations: Optional[torch.FloatTensor] = None,
         historys: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         return_waypoints: Optional[bool] = False,
     ) -> Union[Tuple, CausalLMOutputWithPastUAV]:
+        '''
+        input_ids 是包括instruction以及previous waypoint/Stage/Current position/Current images等信息的token ids
+        prompts 是每个batch的文本形式的task instruction
+        '''
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -130,8 +136,13 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
                 attention_mask = attention_mask.to(device=self.device)
             if labels.device != self.device:
                 labels = labels.to(device=self.device)
+
+            if instruction_input_ids is not None and instruction_input_ids.device != self.device:
+                instruction_input_ids = instruction_input_ids.to(device=self.device)
+
+            if instruction_attention_mask is not None and instruction_attention_mask.device != self.device:
+                instruction_attention_mask = instruction_attention_mask.to(device=self.device)
                 
-        # import ipdb; ipdb.set_trace()
         if type(images) is not list:
             images = images.to(dtype=self.dtype)
         else:
@@ -148,7 +159,6 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         # input_ids = None, inputs_embeds = 融合了image和text的embedding
         input_ids, attention_mask, past_key_values, inputs_embeds, labels, raw_image_features = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
-
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(
@@ -163,9 +173,12 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         )
         hidden_states = outputs[0]
 
+        '''prepare working memory'''
+        import pdb; pdb.set_trace()
+        # 查看一下prompts是不是想要的instruction
+        '''prepare working memory'''
         # Update working memory with semantic tokens pooled from prefix (pre-waypoint) hidden states.
         # This is single-forward and reduces wp/action leakage due to the causal mask.
-        
         if raw_image_features is not None:
             with torch.no_grad():
                 B, S = labels.shape
@@ -186,6 +199,15 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
                 d_llm=self.config.hidden_size,
                 semantic_key_padding_mask=semantic_key_padding_mask,
             )
+
+        '''get instruction embedding from memory manager'''
+        if instruction_input_ids is not None:
+            instruction_embeds = self.get_model().embed_tokens(instruction_input_ids)
+            self.memory_manager.update_instruction_embedding(
+                instruction_embeds=instruction_embeds,
+                instruction_attention_mask=instruction_attention_mask,
+            )
+
 
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         predicted_waypoints = self.forward_waypoint(waypoints_feat)

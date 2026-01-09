@@ -33,3 +33,15 @@ ckpts*
 # DevContainer
 !.devcontainer/*
 
+# VSCode
+.vscode/*
+
+# Unreal/AirSim saved configs & generated files
+**/Saved/
+**/Intermediate/
+**/DerivedDataCache/
+
+# Local extracted env/data
+new_env/
+envs/closeloop_envs/**/Saved/
+dataset/envs/**/Saved/

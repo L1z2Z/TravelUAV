@@ -289,6 +289,9 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
     cur_pos = ','.join([str(round(x, 1)) for x in cur_pos])
     # print('stage:', stage,'delta:', delta, 'cur_pos:', cur_pos)
     sources = preprocess_multimodal(copy.deepcopy([conversation]), data_args, stage=stage, delta=delta, cur_pos=cur_pos)
+    # 要检查preprocess里面有没有进入preprocess_imgsp_uav(目标是获取instruction_input_ids)
+    import pdb; pdb.set_trace()
+    # 要检查preprocess里面有没有进入preprocess_imgsp_uav(目标是获取instruction_input_ids)
     data_dict = preprocess(
         sources,
         tokenizer,
@@ -299,6 +302,11 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
         prompt = data_dict['prompt']
     else:
         prompt = None
+
+    if 'instruction_input_ids' in data_dict:
+        instruction_input_ids = data_dict['instruction_input_ids'][0]
+    else:
+        instruction_input_ids = None
         
     data_dict = dict(input_ids=data_dict["input_ids"][0],
                         labels=data_dict["labels"][0])
@@ -312,6 +320,9 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
     
     if prompt is not None:
         data_dict['prompt'] = prompt
+
+    if instruction_input_ids is not None:
+        data_dict['instruction_input_ids'] = instruction_input_ids
         
     return data_dict, rotation_to_target
 
@@ -333,6 +344,17 @@ def inputs_to_batch(tokenizer, instances: Sequence[Dict]) -> Dict[str, torch.Ten
             labels=labels,
             attention_mask=input_ids.ne(tokenizer.pad_token_id),
         )
+
+        if 'instruction_input_ids' in instances[0]:
+            inst_ids = [instance['instruction_input_ids'] for instance in instances]
+            inst_ids = torch.nn.utils.rnn.pad_sequence(
+                inst_ids,
+                batch_first=True,
+                padding_value=tokenizer.pad_token_id,
+            )
+            inst_ids = inst_ids[:, :tokenizer.model_max_length]
+            batch['instruction_input_ids'] = inst_ids
+            batch['instruction_attention_mask'] = inst_ids.ne(tokenizer.pad_token_id)
 
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
@@ -464,6 +486,7 @@ def preprocess_imgsp_uav(
     # Apply prompt templates
     conversations = []
     guided_prompt = []
+    guided_prompt_token_ids = None
     for i, source in enumerate(sources):
         if roles[source[0]["from"]] != conv.roles[0]:
             # Skip the first one if it is not from human
@@ -557,8 +580,20 @@ def preprocess_imgsp_uav(
     targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
     targets_pad_wp[:, -1] = targets[:, -1]
 
+    # Tokenize instruction-only text (guided_prompt) for word-embedding lookup.
+    # Shape: [B, L_inst]
+    guided_prompt_tokenized = tokenizer(
+        guided_prompt,
+        return_tensors="pt",
+        padding="longest",
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+    )
+    guided_prompt_token_ids = guided_prompt_tokenized.input_ids
+
     return dict(
         input_ids=input_ids_pad_wp,
         labels=targets_pad_wp,
         prompt=guided_prompt,
+        instruction_input_ids=guided_prompt_token_ids,
     )

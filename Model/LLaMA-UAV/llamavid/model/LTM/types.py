@@ -139,12 +139,15 @@ Task Memory Part
 '''
 @dataclass
 class TaskMemoryNode:
-    node_ids: list[int] = field(default_factory=list) # 按时间顺序记录该节点对应的所有node_id
-    anchors: list[Anchor] = field(default_factory=list)
+    node_id: int
+    visit_history: list[int] = field(default_factory=list)  # 记录该节点为导航中第几个抵达的节点，可能重复抵达
+    anchors: list[Anchor] = field(default_factory=list)     # 时间步和位置信息
     M_sem: list[Any] = field(default_factory=list)
     M_env: list[Any] = field(default_factory=list)
     M_act: list[Any] = field(default_factory=list)
-    types: list[bool] = field(default_factory=list) # True表示landmark；False表示航向大幅改变
+    score: float = 0.0
+    #orientation_change: float                               # 航向改变角度
+    #types: list[bool] = field(default_factory=list)         # True表示landmark；False表示航向大幅改变
     #trigger_score: float = 0.0
     #caption:list[str] = field(default_factory=list)
     #sign:dict[Any, Any] = field(default_factory=dict) # 图片、动作等的摘要信息
@@ -161,63 +164,121 @@ class TaskMemoryNode:
 
 @dataclass
 class TaskMemoryEdge:
-    start_id:int
-    end_id:int
+    node_ids:Tuple[int, int]
     distance:float = 0.0
+    orientation:float = 0.0
 
 @dataclass
 class TaskMemoryGraph:
-    nodes:list[TaskMemoryNode] = field(default_factory=list)
-    neighbors:list[list[int]] = field(default_factory=list)
+    nodes:list[TaskMemoryNode] = field(default_factory=list)            # 存储所有节点
+    temporary_nodes:list[TaskMemoryNode] = field(default_factory=list)  # 存储临时节点，待合并和删除
+    nodes_sequence:list[int] = field(default_factory=list)              # 按抵达的时间顺序存储节点id，可以重复（重复抵达）
+    neighbors:list[set[int]] = field(default_factory=list)
     edges:dict[tuple[int, int], TaskMemoryEdge] = field(default_factory=dict)
-    num_nodes:int = 0
     max_nodes:int = TASK_MEMORY_MAX_NODES
 
-    def add_node(self, anchor:Anchor, m_sem:Any, m_env:Any, m_act:Any, type:bool=False):
-        # 先判断是否为新节点
-        for node in self.nodes:
-            if is_close(anchor, node.anchors):
-                # 若为旧节点，则更新信息
-                node.node_ids.append(self.num_nodes)
-                node.anchors.append(anchor)
-                node.M_sem.append(m_sem)
-                node.M_env.append(m_env)
-                node.M_act.append(m_act)
-                node.types.append(type)
-                break
-            else:
-                # 若为新节点，则创建并添加        
-                self.nodes.append(
-                    TaskMemoryNode(
-                        node_ids=[self.num_nodes],
-                        anchors=[anchor],
-                        M_sem=[m_sem],
-                        M_env=[m_env],
-                        M_act=[m_act],
-                        types=[type]
-                    )
-                )
-                break
-        self.num_nodes += 1
-    
-    def add_edge(self):
-        self.edges.append(
-            TaskMemoryEdge(
-                start_id = self.num_nodes - 2,
-                end_id = self.num_nodes - 1,
-                distance = distance(self.nodes[-2].anchors, self.nodes[-1].anchors)
+    @property
+    def num_nodes(self) -> int:
+        return len(self.nodes)
+
+    def _pool_env(self, m_env: Any) -> torch.Tensor:
+        """Convert stored env memory to a [H] or [B,H] tensor for aggregation."""
+        if isinstance(m_env, list) and len(m_env) > 0:
+            m_env = m_env[-1]
+        if not isinstance(m_env, torch.Tensor):
+            raise TypeError(f"M_env must be torch.Tensor, got {type(m_env)}")
+
+        # Common shapes:
+        # - [B, n_env, H] from working memory generator
+        # - [B, H]
+        # - [H]
+        if m_env.dim() == 3:
+            return m_env.mean(dim=1)  # [B, H]
+        if m_env.dim() == 2:
+            return m_env  # [B, H]
+        if m_env.dim() == 1:
+            return m_env.unsqueeze(0)  # [1, H]
+        raise ValueError(f"Unsupported M_env shape: {tuple(m_env.shape)}")
+
+    def add_temporary_node(self, anchor:Anchor, m_sem:Any, m_env:Any, m_act:Any, type:bool=True):
+        node_id = len(self.temporary_nodes)
+        self.temporary_nodes.append(
+            TaskMemoryNode(
+                node_id=node_id,
+                visit_history=[],
+                anchors=[anchor],
+                M_sem=[m_sem],
+                M_env=[m_env],
+                M_act=[m_act],
             )
         )
-        self.neighbors[self.num_nodes - 2].append(self.num_nodes - 1)
-        self.neighbors[self.num_nodes - 1].append(self.num_nodes - 2)
+        
+    
+    def add_edge(self):
+        if self.num_nodes < 2:
+            return
+        a = self.nodes[-2].node_id
+        b = self.nodes[-1].node_id
+        edge = TaskMemoryEdge(
+            node_ids=(a, b),
+            distance=distance(self.nodes[-2].anchors, self.nodes[-1].anchors),
+        )
+        self.edges[(a, b)] = edge
+        assert len(self.neighbors) > max(a, b), (
+            f"neighbors not initialized for node ids: a={a}, b={b}, len(neighbors)={len(self.neighbors)}. "
+            "Expected invariant: len(neighbors) == len(nodes) and node_id matches index."
+        )
+        self.neighbors[a].add(b)
+        self.neighbors[b].add(a)
+
+    def prune(self, window_length:int):
+        # 将temporary_nodes合并为一个new_node
+        self.temporary_nodes = self.temporary_nodes[ -window_length : ]  # 仅保留最近window_length个临时节点
+        max_score_node = max(self.temporary_nodes, key=lambda x: x.score)
+        topk_score_nodes = sorted(self.temporary_nodes, key=lambda x: x.score, reverse=True)[:3]
+
+        # Aggregate env features across top-k temporary nodes.
+        pooled_envs = [self._pool_env(n.M_env) for n in topk_score_nodes]
+        env_mean = torch.stack(pooled_envs, dim=0).mean(dim=0)  # [B, H]
+
+        new_node = TaskMemoryNode(
+            node_id = len(self.nodes),
+            visit_history = [len(self.nodes_sequence)],
+            anchors = [max_score_node.anchors[-1]],
+            M_sem = [max_score_node.M_sem[-1]],
+            M_env = [env_mean],
+            M_act = [max_score_node.M_act[-1]],
+            score = max_score_node.score,
+        )
+
+        # 检查new_node是否是旧节点
+        for node in self.nodes:
+            if len(new_node.anchors) > 0 and is_close(new_node.anchors[-1], node.anchors):
+                # 若为旧节点，则更新信息
+                node.visit_history.append(len(self.nodes_sequence))
+                node.anchors.append(new_node.anchors[-1])
+                node.M_sem.append(new_node.M_sem[-1])
+                node.M_env.append(new_node.M_env[-1])
+                node.M_act.append(new_node.M_act[-1])
+
+                self.add_edge()
+                self.nodes_sequence.append(node.node_id)
+                self.temporary_nodes = []               # 清空临时节点列表
+                return
+            else:
+                continue
+
+        # 若为新节点，则添加到nodes中
+        self.nodes.append(new_node)
+        self.nodes_sequence.append(new_node.node_id)
+        self.neighbors.append(set())
+        self.add_edge()
+        self.temporary_nodes = []               # 清空临时节点列表
 
     def neighbors_of(self, node_id:int) -> list[int]:
         return self.neighbors[node_id]
-
-    def prune(self, strategy:str='closest'):
-        pass
-
-    def retrieve(self, query:Any, topk:int=4) -> list[TaskMemoryNode]:
+    
+    def retrieve(self, query:Any, topk:int=TASK_MEMORY_DEFAULT_TOPK) -> list[TaskMemoryNode]:
         pass
 
 '''
@@ -230,9 +291,10 @@ class OpenMemoryBuffer:
     M_detail:list[Any] = field(default_factory=list)
     max_size:int = OPEN_MEMORY_MAX_SIZE
 
-    def add_memory(self, anchor:Anchor, m_open:Any):
+    def add_memory(self, anchor:Anchor, M_env:Any, M_detail:Any):
         self.anchors.append(anchor)
-        self.M_open.append(m_open)
+        self.M_env.append(M_env)
+        self.M_detail.append(M_detail)
 
     def retrieve(self, query:torch.Tensor, topk:int=OPEN_MEMORY_DEFAULT_TOPK) -> list[Any]:
         if len(self.anchors) == 0:
