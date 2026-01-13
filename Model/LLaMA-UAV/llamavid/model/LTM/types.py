@@ -37,10 +37,12 @@ Working Memory Part
 '''
 @dataclass
 class WorkingMemory:
-    current_anchor: Anchor
-    M_wsem: Any = None
-    M_wenv: Any = None
-    M_detail: Any = None
+    # current_anchor is a per-batch list of anchors (len == B).
+    current_anchor: Optional[list[Anchor]] = None
+    # Memory tensors keep batch dimension (B, ...).
+    M_wsem: Optional[torch.Tensor] = None
+    M_wenv: Optional[torch.Tensor] = None
+    M_detail: Optional[torch.Tensor] = None
 
     def prepare_M_env(self):
         pass
@@ -94,7 +96,7 @@ class WorkingMemoryGenerator(nn.Module):
         raw_image_features: torch.Tensor,
         semantic_feature: torch.Tensor,
         semantic_key_padding_mask: Optional[torch.Tensor] = None,
-        anchor: Anchor = None,
+        anchor: Optional[list[Anchor]] = None,
     ) -> WorkingMemory:
         B, _, _ = raw_image_features.shape # B x P x D_in
 
@@ -299,8 +301,26 @@ class OpenMemoryBuffer:
     def retrieve(self, query:torch.Tensor, topk:int=OPEN_MEMORY_DEFAULT_TOPK) -> list[Any]:
         if len(self.anchors) == 0:
             return []
-        
-        cos_similarities = [F.cosine_similarity(query, m) for m in self.M_open]
+
+        def _pool_to_vec(x: Any) -> torch.Tensor:
+            if not isinstance(x, torch.Tensor):
+                raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+            # Accept common shapes produced by working memory generator.
+            # - [1, n_env, H] -> [H]
+            # - [B, n_env, H] -> [H] (mean over B)
+            # - [1, H] -> [H]
+            # - [H] -> [H]
+            if x.dim() == 3:
+                x = x.mean(dim=1)  # [B, H]
+            if x.dim() == 2:
+                x = x.mean(dim=0)  # [H]
+            if x.dim() == 1:
+                return x
+            raise ValueError(f"Unsupported tensor shape: {tuple(x.shape)}")
+
+        q = _pool_to_vec(query)
+        cos_similarities = [float(F.cosine_similarity(q, _pool_to_vec(m), dim=0).item()) for m in self.M_env]
+        topk = min(int(topk), len(cos_similarities))
         sorted_indices = sorted(range(len(cos_similarities)), key=lambda i: cos_similarities[i], reverse=True)
         topk_indices = sorted_indices[:topk]
-        return [self.M_open[i] for i in topk_indices]
+        return [self.M_env[i] for i in topk_indices]

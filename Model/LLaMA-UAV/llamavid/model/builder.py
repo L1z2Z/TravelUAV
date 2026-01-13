@@ -22,11 +22,16 @@ import torch
 from llamavid.model import *
 from llamavid.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from peft import PeftModel
-
+def mem(tag):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        print(f"[{tag}] alloc={torch.cuda.memory_allocated()/1024**2:.1f} MiB | "
+              f"reserved={torch.cuda.memory_reserved()/1024**2:.1f} MiB | "
+              f"max={torch.cuda.max_memory_allocated()/1024**2:.1f} MiB")
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
     kwargs = {"device_map": device_map}
-
+    mem("before load_pretrained_model")
     if load_8bit:
         kwargs['load_in_8bit'] = True
     elif load_4bit:
@@ -38,9 +43,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             bnb_4bit_quant_type='nf4'
         )
     else:
-        kwargs['torch_dtype'] = torch.float16
+        kwargs['torch_dtype'] = torch.bfloat16
 
-    if 'vid' or 'uav' in model_name.lower():
+    if ('vid' in model_name.lower()) or ('uav' in model_name.lower()):
         # Load LLaMA-VID model
         if model_base is not None:
             # this may be mm projector only
@@ -49,7 +54,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
             cfg_pretrained = AutoConfig.from_pretrained(model_path)
             model = LlavaLlamaAttForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
-            model.to(torch.bfloat16)
+            mem("before to(bf16)")
+            # model.to(torch.bfloat16)
+            mem("after to(bf16)")
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
             model.load_state_dict(mm_projector_weights, strict=False)
         else:
@@ -80,7 +87,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
     image_processor = None
 
-    if 'vid' or 'uav' in model_name.lower():
+    if ('vid' in model_name.lower()) or ('uav' in model_name.lower()):
         mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
         mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
         if mm_use_im_patch_token:
@@ -93,6 +100,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         if not vision_tower.is_loaded:
             vision_tower.load_model()
         vision_tower.to(device=device, dtype=torch.bfloat16)
+        mem("after vision_tower.to")
         image_processor = vision_tower.image_processor
         model.config.model_path = model_path
         model.get_model().initialize_attention_modules(model.config, for_eval=True)
@@ -102,4 +110,5 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         context_len = 2048
 
+    mem("after load_pretrained_model")
     return tokenizer, model, image_processor, context_len

@@ -4,8 +4,12 @@
 root_dir=. # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
 
+# Use the intended conda env interpreter explicitly.
+PYTHON_BIN=/home/liz/miniconda3/envs/llamauav/bin/python
 
-CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/eval.py \
+
+# -s disables user site-packages (prevents ~/.local from overriding conda env deps).
+CUDA_VISIBLE_DEVICES=0 $PYTHON_BIN -s -u $root_dir/src/vlnce_src/eval.py \
     --run_type eval \
     --name TravelLLM \
     --gpu_id 0 \
@@ -15,8 +19,8 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/eval.py \
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
-    --dataset_path /home/ubuntu/xrf/TravelUAV/dataset/data \
-    --eval_save_path /home/ubuntu/xrf/TravelUAV/eval_results \
+    --dataset_path /home/liz/data/TravelUAV_data/dataset_extracted \
+    --eval_save_path /home/liz/data/TravelUAV_data/eval_results \
     --model_path $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32 \
     --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \
     --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \

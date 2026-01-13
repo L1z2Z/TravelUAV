@@ -175,7 +175,37 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
 
         '''prepare working memory'''
         import pdb; pdb.set_trace()
-        # 查看一下prompts是不是想要的instruction
+
+        # ---------- PDB manual debug (copy/paste into pdb) ----------
+        # 1) Print prompts as raw text
+        # print("=== prompts (raw) ===")
+        # if prompts is None:
+        #     print(None)
+        # else:
+        #     print("\n---\n".join(prompts))
+        #
+        # 2) Tokenize prompts with the tokenizer used for instruction_input_ids
+        #    (This creates check_instruction_ids for manual comparison)
+        # from transformers import AutoTokenizer
+        # tok_path = getattr(self.config, "_name_or_path", None) or getattr(self.config, "name_or_path", None)
+        # tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=False)
+        # if tokenizer.pad_token is None:
+        #     tokenizer.pad_token = tokenizer.eos_token
+        # check_instruction_ids = tokenizer(
+        #     prompts,
+        #     return_tensors="pt",
+        #     padding=True,
+        #     truncation=True,
+        # ).input_ids
+        # print("=== check_instruction_ids ===")
+        # print(check_instruction_ids)
+        #
+        # 3) Print instruction_input_ids (provided by wrapper)
+        # print("=== instruction_input_ids ===")
+        # print(instruction_input_ids)
+        # -----------------------------------------------------------
+
+        # 查看一下instruction_input_ids是不是想要的prompts
         '''prepare working memory'''
         # Update working memory with semantic tokens pooled from prefix (pre-waypoint) hidden states.
         # This is single-forward and reduces wp/action leakage due to the causal mask.
