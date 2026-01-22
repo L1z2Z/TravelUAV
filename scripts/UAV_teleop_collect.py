@@ -8,6 +8,19 @@ import cv2
 import numpy as np
 import pygame  # 新增：用于键盘连续输入
 
+def _ramp(current: float, target: float, max_delta: float) -> float:
+    """Limit how fast a command can change (simple acceleration limiter).
+
+    AirSim 的 moveByVelocity* 类接口是“速度指令 + 持续时间”。
+    如果每帧直接把速度从 0 跳到最大/再跳回 0，会非常“顿”。
+    这里用一个最大变化率，把速度/角速度平滑地拉到目标值。
+    """
+    if target > current + max_delta:
+        return current + max_delta
+    if target < current - max_delta:
+        return current - max_delta
+    return target
+
 
 # === 根据 settings/30001/settings.json 设定 ===
 API_PORT = 30001          # 对应 "ApiServerPort": 30001
@@ -15,7 +28,7 @@ VEHICLE_NAME = "Drone_1"  # settings 里配置的无人机名字
 CAM_NAMES = ["FrontCamera", "LeftCamera", "RightCamera", "RearCamera", "DownCamera"]
 
 # 数据保存根目录
-SAVE_ROOT = "/home/ubuntu/xrf/data/TravelUAV_mini/memory_data/NewYorkCity"
+SAVE_ROOT = "/home/liz/data/TravelUAV_data/memory_data/NewYorkCity"
 PREFIX = "NYC_"
 WIDTH = 4
 
@@ -178,16 +191,51 @@ def main():
 
     recording = False
     prev_p_pressed = False
+    save_path = None
 
     running = True
-    base_speed = 3.0
-    duration = 0.1  # 每个时间片的持续时间（秒）越小越平滑
-    yaw_rate = 10.0  # 每个时间片的 yaw 变化量（度）
+    # === 控制参数（核心优化点） ===
+    # 旧版本的“卡顿/不流畅”主要来自：
+    # 1) 每次 moveByVelocityBodyFrameAsync(...).join() 都会阻塞主循环（控制频率被强行降到 duration 的倒数附近）
+    # 2) Q/E 旋转使用 rotateToYawAsync(...).join()，同样阻塞
+    # 3) 速度指令从 0<->最大瞬间跳变，体感像“点动”
+    # 这里改成：高频不阻塞发送 + 速度/角速度限加速度平滑 + yaw 用 rate 模式
+    CONTROL_HZ = 50
+    PREVIEW_HZ = 10  # 预览相机拉流太频繁会拖慢控制，10Hz 足够看
+
+    # 速度上限（录制时会自动降低）
+    max_speed_xy = 3.0
+    max_speed_z = 2.0
+    max_yaw_rate_deg_s = 60.0
+
+    # 加速度限制（越大越“跟手”，越小越“丝滑”）
+    accel_xy = 1.0   # m/s^2
+    accel_z = 1.0    # m/s^2
+    accel_yaw = 180.0  # deg/s^2
+
+    # 当前“平滑后”的速度/角速度状态
+    vx = vy = vz = 0.0
+    yaw_rate = 0.0
+
+    # 记录参数：不要在控制循环里每帧抓 5 相机+写盘，否则必然掉帧
+    RECORD_HZ = 10
+    IMAGE_HZ = 2
+    record_interval = 1.0 / RECORD_HZ
+    image_stride = max(1, int(RECORD_HZ / IMAGE_HZ))
+    last_record_t = 0.0
+
+    last_preview_t = 0.0
+    last_preview_surf = None
 
     # 预览相机，默认前向
     current_preview_cam = "FrontCamera"
 
     while running:
+        # 固定控制频率，并拿到真实 dt（秒）用于平滑
+        dt = clock.tick(CONTROL_HZ) / 1000.0
+        if dt <= 0.0:
+            dt = 1.0 / CONTROL_HZ
+
         # 处理 pygame 事件（关闭窗口等）
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -211,24 +259,27 @@ def main():
         if keys[pygame.K_5]:
             current_preview_cam = "DownCamera"
 
-        # 拉一张当前预览相机的图像并显示在 pygame 窗口
-        try:
-            resp = client.simGetImage(
-                current_preview_cam,
-                airsim.ImageType.Scene,
-                vehicle_name=VEHICLE_NAME,
-            )
-            if resp is not None:
-                img1d = np.frombuffer(resp, dtype=np.uint8)
-                if img1d.size > 0:
-                    img = cv2.imdecode(img1d, cv2.IMREAD_UNCHANGED)
-                    if img is not None:
-                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        surf = pygame.surfarray.make_surface(np.rot90(img_rgb))
-                        screen.blit(surf, (0, 0))
-        except Exception as e:
-            # 预览失败不影响控制
-            pass
+        # 拉一张当前预览相机的图像并显示在 pygame 窗口（降频到 PREVIEW_HZ，避免拖慢控制）
+        now_t = time.time()
+        if (now_t - last_preview_t) >= (1.0 / PREVIEW_HZ):
+            try:
+                resp = client.simGetImage(
+                    current_preview_cam,
+                    airsim.ImageType.Scene,
+                    vehicle_name=VEHICLE_NAME,
+                )
+                if resp is not None:
+                    img1d = np.frombuffer(resp, dtype=np.uint8)
+                    if img1d.size > 0:
+                        img = cv2.imdecode(img1d, cv2.IMREAD_UNCHANGED)
+                        if img is not None:
+                            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                            last_preview_surf = pygame.surfarray.make_surface(np.rot90(img_rgb))
+                            last_preview_t = now_t
+            except Exception:
+                pass
+        if last_preview_surf is not None:
+            screen.blit(last_preview_surf, (0, 0))
 
         # 处理 P 键：上升沿触发开始/结束记录
         p_pressed = keys[pygame.K_p]
@@ -236,75 +287,69 @@ def main():
             recording = not recording
             if recording:
                 save_path = create_next_folder()  # 创建新的轨迹数据文件夹
-                base_speed = 1.0
+                # 录制时降低速度上限，更容易采到“细腻”的轨迹
+                max_speed_xy = 1.0
+                max_speed_z = 1.0
                 print("[P] 开始记录轨迹和图像")
-                # 记录初始帧
+                last_record_t = 0.0
+                # 立刻记录一帧
                 state = client.getMultirotorState(vehicle_name=VEHICLE_NAME)
                 trajectory.append(state_to_dict(state, step_idx))
                 save_multi_camera_images(client, step_idx, save_path)
                 step_idx += 1
             else:
                 print("[P] 结束记录，将在退出或下次按 ESC 后保存最后一帧")
-                base_speed = 3.0
+                max_speed_xy = 3.0
+                max_speed_z = 2.0
         prev_p_pressed = p_pressed
 
-        vx = vy = vz = 0.0
+        # === 目标速度/角速度（由按键决定） ===
+        tgt_vx = (1.0 if keys[pygame.K_w] else 0.0) - (1.0 if keys[pygame.K_s] else 0.0)
+        tgt_vy = (1.0 if keys[pygame.K_d] else 0.0) - (1.0 if keys[pygame.K_a] else 0.0)
+        # AirSim: z 轴向下为正，所以“上升(R)”是 vz 负，“下降(F)”是 vz 正
+        tgt_vz = (1.0 if keys[pygame.K_f] else 0.0) - (1.0 if keys[pygame.K_r] else 0.0)
+        tgt_yaw_rate = (1.0 if keys[pygame.K_e] else 0.0) - (1.0 if keys[pygame.K_q] else 0.0)
 
-        # WASD 水平移动（机体坐标）
-        if keys[pygame.K_w]:
-            vx += base_speed
-        if keys[pygame.K_s]:
-            vx -= base_speed
-        if keys[pygame.K_a]:
-            vy -= base_speed
-        if keys[pygame.K_d]:
-            vy += base_speed
+        tgt_vx *= max_speed_xy
+        tgt_vy *= max_speed_xy
+        tgt_vz *= max_speed_z
+        tgt_yaw_rate *= max_yaw_rate_deg_s
 
-        # R/F 垂直移动（AirSim 中 z 轴向下为正）
-        if keys[pygame.K_r]:
-            vz -= 5 * base_speed
-        if keys[pygame.K_f]:
-            vz += 5 * base_speed
+        # === 平滑：限加速度 ===
+        vx = _ramp(vx, tgt_vx, accel_xy * dt)
+        vy = _ramp(vy, tgt_vy, accel_xy * dt)
+        vz = _ramp(vz, tgt_vz, accel_z * dt)
+        yaw_rate = _ramp(yaw_rate, tgt_yaw_rate, accel_yaw * dt)
 
-        # Q/E 控制 yaw 旋转
-        if keys[pygame.K_q] or keys[pygame.K_e]:
-            curr_yaw = airsim.to_eularian_angles(
-                client.getMultirotorState(vehicle_name=VEHICLE_NAME).kinematics_estimated.orientation
-            )[2]
-            if keys[pygame.K_q]:
-                target_yaw = curr_yaw - np.deg2rad(yaw_rate)
-            else:
-                target_yaw = curr_yaw + np.deg2rad(yaw_rate)
-            try:
-                client.rotateToYawAsync(np.rad2deg(target_yaw), vehicle_name=VEHICLE_NAME).join()
-            except Exception as e:
-                print("rotateToYawAsync ERROR:", repr(e))
+        # === 发送控制（不 join，避免阻塞） ===
+        # 给的 duration 稍大于控制周期，避免某一帧卡顿导致指令“断档”
+        cmd_duration = max(0.06, 2.5 * dt)
+        try:
+            client.moveByVelocityBodyFrameAsync(
+                vx,
+                vy,
+                vz,
+                cmd_duration,
+                drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+                yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
+                vehicle_name=VEHICLE_NAME,
+            )
+        except Exception as e:
+            print("moveByVelocityBodyFrameAsync ERROR:", repr(e))
 
-        # 只有当有按键时才发送控制
-        if any([vx, vy, vz]):
-            try:
-                # 使用机体坐标系速度
-                client.moveByVelocityBodyFrameAsync(
-                    vx,
-                    vy,
-                    vz,
-                    duration,
-                    drivetrain=airsim.DrivetrainType.ForwardOnly,
-                    yaw_mode=airsim.YawMode(is_rate=False, yaw_or_rate=0.0),
-                    vehicle_name=VEHICLE_NAME,
-                ).join()
-            except Exception as e:
-                print("moveByVelocityAsync ERROR:", repr(e))
-            else:
-                if recording:
-                    state = client.getMultirotorState(vehicle_name=VEHICLE_NAME)
-                    trajectory.append(state_to_dict(state, step_idx))
-                    if step_idx % 10 == 0:
-                        save_multi_camera_images(client, step_idx, save_path)
-                    step_idx += 1
+        # === 记录（降频） ===
+        if recording and save_path is not None:
+            if (now_t - last_record_t) >= record_interval:
+                last_record_t = now_t
+                state = client.getMultirotorState(vehicle_name=VEHICLE_NAME)
+                trajectory.append(state_to_dict(state, step_idx))
+                # 图片比状态更重，按 stride 降频保存
+                if (step_idx % image_stride) == 0:
+                    save_multi_camera_images(client, step_idx, save_path)
+                step_idx += 1
 
         pygame.display.flip()
-        clock.tick(30)
+
 
     # 如果处于记录状态，记录结束帧
     if recording:
@@ -321,11 +366,14 @@ def main():
     client.armDisarm(False, vehicle_name=VEHICLE_NAME)
     client.enableApiControl(False, vehicle_name=VEHICLE_NAME)
 
-    # 8. 保存轨迹 JSON
-    traj_path = os.path.join(save_path, "trajectory.json")
-    with open(traj_path, "w") as f:
-        json.dump(trajectory, f, indent=2)
-    print(f"Saved trajectory to {traj_path}")
+    # 8. 保存轨迹 JSON（只有真的开始录制才会有 save_path）
+    if save_path is not None:
+        traj_path = os.path.join(save_path, "trajectory.json")
+        with open(traj_path, "w") as f:
+            json.dump(trajectory, f, indent=2)
+        print(f"Saved trajectory to {traj_path}")
+    else:
+        print("No trajectory saved (recording never started).")
 
 
 if __name__ == "__main__":

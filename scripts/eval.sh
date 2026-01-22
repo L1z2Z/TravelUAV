@@ -19,7 +19,7 @@ CUDA_VISIBLE_DEVICES=0 $PYTHON_BIN -s -u $root_dir/src/vlnce_src/eval.py \
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
-    --dataset_path /home/liz/data/TravelUAV_data/dataset_extracted \
+    --dataset_path /home/liz/data/TravelUAV_data/dataset \
     --eval_save_path /home/liz/data/TravelUAV_data/eval_results \
     --model_path $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32 \
     --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \

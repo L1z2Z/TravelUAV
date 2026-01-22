@@ -17,7 +17,7 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/dagger.py \
     --dagger_p 0.4 \
     --maxWaypoints 200 \
     --activate_maps NYCEnvironmentMegapa \
-    --dataset_path /mnt/data5/airdrone/dataset/replay_data_log0.1_image0.5/ \
+    --dataset_path /home/liz/data/TravelUAV_data/dataset \
     --dagger_save_path $root_dir/data/dagger_data \
     --model_path $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32 \
     --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \
